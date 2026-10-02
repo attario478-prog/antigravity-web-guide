@@ -1,0 +1,160 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+
+const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+
+type Message = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  meta?: string;
+};
+
+export default function App() {
+  const [prompt, setPrompt] = useState('Create a simple landing page for a developer tool.');
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [status, setStatus] = useState('Ready');
+  const [isLoading, setIsLoading] = useState(false);
+  const socketRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    return () => {
+      socketRef.current?.close();
+    };
+  }, []);
+
+  const connectSocket = (id: string) => {
+    socketRef.current?.close();
+    const wsUrl = apiUrl.replace(/^http/, 'ws') + `/ws/chat/${id}`;
+    const socket = new WebSocket(wsUrl);
+    socketRef.current = socket;
+
+    socket.onopen = () => setStatus('Connected');
+    socket.onclose = () => setStatus('Connection closed');
+    socket.onerror = () => setStatus('Socket error');
+
+    socket.onmessage = (event) => {
+      try {
+        const packet = JSON.parse(event.data);
+        if (packet.event === 'error') {
+          setStatus(packet.message || 'Error');
+          return;
+        }
+
+        const textDelta = packet?.step_update?.text_delta;
+        const toolName = packet?.step_update?.tool_name;
+        const toolState = packet?.step_update?.state;
+        const result = packet?.result;
+
+        if (textDelta) {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last && last.role === 'assistant' && last.meta === 'streaming') {
+              return [...prev.slice(0, -1), { ...last, content: last.content + textDelta }];
+            }
+            return [...prev, { id: crypto.randomUUID(), role: 'assistant', content: textDelta, meta: 'streaming' }];
+          });
+        }
+
+        if (toolName) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              role: 'assistant',
+              content: `${toolState === 'DONE' ? 'Completed' : 'Running'} ${toolName}`,
+              meta: 'tool',
+            },
+          ]);
+        }
+
+        if (result) {
+          setStatus(result.status || 'Finished');
+          setIsLoading(false);
+        }
+      } catch {
+        console.error('Failed to parse packet');
+      }
+    };
+  };
+
+  const handleSubmit = async () => {
+    if (!prompt.trim()) return;
+
+    setStatus('Starting session');
+    setIsLoading(true);
+    setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: 'user', content: prompt }]);
+
+    try {
+      const response = await fetch(`${apiUrl}/chat/start?prompt=${encodeURIComponent(prompt)}` , {
+        method: 'POST',
+      });
+
+      const data = await response.json();
+      if (!data.session_id) {
+        throw new Error('No session id returned');
+      }
+
+      setSessionId(data.session_id);
+      connectSocket(data.session_id);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Failed to start session');
+      setIsLoading(false);
+    }
+  };
+
+  const statusColor = useMemo(() => {
+    if (status.includes('Connected') || status.includes('Finished')) return '#22c55e';
+    if (status.includes('Error') || status.includes('Failed')) return '#ef4444';
+    return '#fbbf24';
+  }, [status]);
+
+  return (
+    <div className="app-shell">
+      <div className="panel">
+        <header className="header">
+          <div>
+            <p className="eyebrow">Antigravity</p>
+            <h1>Web App Starter</h1>
+          </div>
+          <div className="status-badge" style={{ background: statusColor }}>
+            {status}
+          </div>
+        </header>
+
+        <textarea
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          rows={6}
+          placeholder="Describe what you want the agent to build..."
+        />
+
+        <div className="actions">
+          <button onClick={handleSubmit} disabled={isLoading}>
+            {isLoading ? 'Running...' : 'Run Agent'}
+          </button>
+          {sessionId && (
+            <button className="secondary" onClick={() => setMessages([])}>
+              Clear
+            </button>
+          )}
+        </div>
+
+        <div className="chat-box">
+          {messages.length === 0 ? (
+            <div className="empty-state">No messages yet.</div>
+          ) : (
+            messages.map((message) => (
+              <div key={message.id} className={`message ${message.role}`}>
+                <div className="bubble">
+                  <div>{message.content}</div>
+                  {message.meta && <small>{message.meta}</small>}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
