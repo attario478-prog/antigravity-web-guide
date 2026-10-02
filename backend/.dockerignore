@@ -1,0 +1,26 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    tar \
+    gzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and verify Antigravity CLI (ARM64 binary)
+RUN curl -fsSL "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.27-5211191891591168/linux-arm/cli_linux_arm64.tar.gz" -o /tmp/agy.tar.gz && \
+    echo "ed45f6930785aa4b42f14e07ace1c9d91a94fb76e760f54acbd7d3d3951e1f957fd456a0dae2a3124dd9a3b689bf7afb7c9303a3e4ba95037fc10063424d9bf9 /tmp/agy.tar.gz" | sha512sum -c && \
+    tar -xzf /tmp/agy.tar.gz -C /usr/local/bin/ && \
+    chmod +x /usr/local/bin/agy && \
+    rm -f /tmp/agy.tar.gz
+
+COPY requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 8080
+
+CMD ["python", "main.py"]

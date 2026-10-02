@@ -1,0 +1,220 @@
+# Antigravity Web Guide
+
+## Goal
+
+Build a Google-hosted Antigravity application that can run in the browser while keeping the logic close to the proven Mobile Harness architecture.
+
+## Why Mobile Harness matters
+
+The Mobile Harness repo already contains most of the necessary building blocks:
+
+- Antigravity CLI install and verification
+- OAuth sign-in flow
+- Stream JSON parser
+- Runtime session startup logic
+- Workspace isolation and file change tracking
+- Terminal-like output handling
+
+This means we do not need to invent the concept from zero; we mainly need to adapt the runtime model to a browser-based deployment pattern.
+
+## Recommended architecture
+
+```text
+User Browser
+  |
+  v
+Firebase Hosting (Next.js or Vite React frontend)
+  |
+  v
+Cloud Run (FastAPI backend)
+  |
+  v
+Container with Linux + Antigravity CLI (/usr/bin/agy)
+  |
+  v
+Google AI / Antigravity runtime service
+```
+
+## Key backend responsibilities
+
+The backend is responsible for:
+
+- creating a session workspace per chat
+- starting the Antigravity CLI process
+- writing the prompt with the proper workspace context
+- streaming stdout/stderr as JSON events
+- collecting conversation IDs and state
+- exposing WebSocket updates to the browser
+
+## Key frontend responsibilities
+
+The frontend is responsible for:
+
+- login flow
+- model selection
+- chat messages
+- tool activity display
+- previewing generated web apps or projects
+- session state and resume support
+
+## Minimum backend implementation
+
+This is the simplest practical model:
+
+```python
+from fastapi import FastAPI, WebSocket, HTTPException
+from pathlib import Path
+import subprocess, json, uuid
+
+app = FastAPI()
+
+SESSIONS = {}
+WORKSPACE_ROOT = "/tmp/antigravity-workspaces"
+Path(WORKSPACE_ROOT).mkdir(exist_ok=True, parents=True)
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+@app.post("/chat/start")
+async def start_chat(prompt: str, model: str = "gemini-2.0-flash"):
+    session_id = str(uuid.uuid4())
+    workspace = Path(WORKSPACE_ROOT) / session_id
+    workspace.mkdir(exist_ok=True, parents=True)
+
+    command = [
+        "/usr/bin/agy",
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+        "--print-timeout", "60m",
+        "--dangerously-skip-permissions",
+        "--model", model,
+        "--new-project",
+    ]
+
+    proc = subprocess.Popen(
+        command,
+        cwd=str(workspace),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+
+    request = {
+        "event": "user",
+        "message": {
+            "content": f"""
+<pocketdev_workspace>
+The active project workspace is {workspace}.
+Create, edit, read, run, and build project files inside this directory only.
+</pocketdev_workspace>
+
+{prompt}
+"""
+        }
+    }
+
+    proc.stdin.write(json.dumps(request) + "\n")
+    proc.stdin.flush()
+    proc.stdin.close()
+    SESSIONS[session_id] = proc
+    return {"session_id": session_id}
+
+@app.websocket("/ws/chat/{session_id}")
+async def ws_chat(websocket: WebSocket, session_id: str):
+    await websocket.accept()
+    proc = SESSIONS.get(session_id)
+    if proc is None:
+        await websocket.send_json({"event": "error", "message": "Session not found"})
+        await websocket.close()
+        return
+
+    for line in proc.stdout:
+        if not line.strip():
+            continue
+        try:
+            await websocket.send_json(json.loads(line))
+        except Exception:
+            pass
+
+    await websocket.close()
+```
+
+## Why the backend must provide streaming
+
+The Antigravity CLI emits structured event lines. The browser UI should consume these and render them as:
+
+- assistant text
+- tool start events
+- tool completion events
+- final result event
+
+This mirrors the Mobile Harness runtime bridge pattern.
+
+## Browser UI design
+
+The frontend should include:
+
+- login panel
+- model selector
+- session list
+- chat panel
+- tool activity feed
+- project preview if the task generates a local web app
+
+The frontend should consume the JSON stream from WebSocket and update the UI in real time.
+
+## Google Cloud deployment plan
+
+### Services
+
+- Firebase Hosting: host the React/Next.js frontend
+- Cloud Run: run the FastAPI backend
+- Secret Manager: store OAuth client data and deployment secrets
+- Cloud Build: build and deploy on main branch push
+- Cloud Logging: capture runtime logs
+
+### Pipeline flow
+
+```text
+GitHub push -> Cloud Build -> Build Docker image -> Push to Artifact Registry -> Deploy to Cloud Run -> Update Firebase Hosting
+```
+
+## Cloud Run configuration recommendations
+
+- Use a Dockerfile with Python 3.11 slim
+- Run Uvicorn on port 8080
+- Set memory and concurrency carefully for CPU-bound tasks
+- Keep secret access through Secret Manager
+- Include a `/health` endpoint
+
+## Production concerns
+
+- Antigravity tasks may require long-running sessions. Set Cloud Run timeout high enough.
+- CLI execution can be CPU heavy; memory sizing matters.
+- Users should not share workspaces accidentally; per-session directories are important.
+- Implement auth, rate limits, and proper DB tracking for real usage.
+
+## Best route
+
+If your aim is to get to market quickly, use this order:
+
+1. Fork Mobile Harness into an Antigravity-only Android app
+2. Rebuild the same core runtime as a FastAPI web backend
+3. Create a browser UI around the backend later
+
+This lets you reuse the proven architecture while creating a cloud option.
+
+## Final recommendation
+
+For Google ecosystem hosting, this is the cleanest stack:
+
+- Firebase Hosting for UI
+- Cloud Run for backend
+- Secret Manager for keys
+- Cloud Build for continuous delivery
+- Firestore for session metadata
+
+This is the most compatible choice if you want a browser app that is easy to deploy and maintain.
